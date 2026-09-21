@@ -172,8 +172,11 @@ def check_for_slots(test_mode: bool = False):
             # Step 1: Navigate to PrenotaMi
             log.info("Navigating to PrenotaMi...")
             page.goto("https://prenotami.esteri.it/", timeout=60000)
-            page.wait_for_load_state("networkidle", timeout=45000)
-            time.sleep(2)
+            page.wait_for_selector(
+                "a:has-text('EFFETTUARE IL LOGIN'), a:has-text('LOG IN'), "
+                "a:has-text('Log in'), a[href*='Login']",
+                timeout=45000
+            )
 
             # Step 2: Click login
             log.info("Clicking login...")
@@ -187,8 +190,10 @@ def check_for_slots(test_mode: bool = False):
                 except:
                     continue
 
-            page.wait_for_load_state("networkidle", timeout=45000)
-            time.sleep(3)
+            page.wait_for_selector(
+                "input#UserName, input[name='UserName'], input[type='text']",
+                timeout=45000
+            )
 
             # Step 3: Login
             log.info("Logging in...")
@@ -219,7 +224,7 @@ def check_for_slots(test_mode: bool = False):
                 except:
                     continue
 
-            page.wait_for_load_state("networkidle", timeout=45000)
+            page.wait_for_load_state("domcontentloaded", timeout=45000)
             time.sleep(5)
 
             page_text = page.content().lower()
@@ -233,7 +238,7 @@ def check_for_slots(test_mode: bool = False):
             # Step 4: Navigate to Services
             log.info("Navigating to services...")
             page.goto("https://prenotami.esteri.it/Services", timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=15000)
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
             time.sleep(3)
 
             # Step 5: Click PRENOTA for Schengen visa
