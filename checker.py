@@ -58,6 +58,9 @@ def send_email_notification(subject: str, body: str, attachments=None):
     attachments: optional list of image paths to attach to the email.
     """
     clean_body = body.replace("\\\\n", "\n").replace("\\n", "\n")
+    # Email headers cannot contain newlines, and error messages (e.g. Playwright
+    # timeouts) are multi-line — collapse them or the send fails outright.
+    subject = " ".join(subject.split())[:150]
 
     # 1. Write to notification log file (always works)
     try:
@@ -89,7 +92,8 @@ def send_email_notification(subject: str, body: str, attachments=None):
         except Exception:
             pass
 
-    # 4. Try Gmail SMTP as best-effort (may fail)
+    # 4. Gmail SMTP — returns True only if the email actually went out, so callers can
+    #    tell the difference between "notified" and "silently did nothing".
     gmail_password = os.environ.get("GMAIL_APP_PASSWORD", "")
     if gmail_password:
         try:
@@ -119,10 +123,12 @@ def send_email_notification(subject: str, body: str, attachments=None):
                 server.sendmail(EMAIL, NOTIFY_EMAILS, msg.as_string())
             log.info(f"Email sent to {', '.join(NOTIFY_EMAILS)} via Gmail SMTP"
                      + (f" with attachments: {', '.join(attached)}" if attached else ""))
+            return True
         except Exception as e:
-            log.warning(f"Gmail SMTP failed (non-critical): {e}")
+            log.error(f"Gmail SMTP failed — NO EMAIL WAS SENT: {e}")
     else:
-        log.info("GMAIL_APP_PASSWORD not set — skipping email, using log + macOS notify")
+        log.error("GMAIL_APP_PASSWORD not set — NO EMAIL WAS SENT")
+    return False
 
 
 def should_notify() -> bool:
@@ -137,6 +143,35 @@ def should_notify() -> bool:
 
 def mark_notified():
     COOLDOWN_FILE.write_text(str(time.time()))
+
+
+# Field names on the identity provider are unverified and may be prefixed (e.g. pf.username,
+# callback_0), so match in JS with lowercased comparison rather than CSS attribute selectors,
+# which are case-sensitive. Tags matches with a data attribute so Playwright can fill them
+# normally and fire the events the page expects.
+FIND_LOGIN_FIELDS_JS = """() => {
+    const isVisible = el => el.getClientRects().length > 0;
+    const inputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
+    const describe = el => el && {name: el.name, id: el.id, type: el.type};
+
+    const password = inputs.find(el => el.type === 'password');
+    const looksLikeUser = el => {
+        const attrs = [el.name, el.id, el.getAttribute('autocomplete')]
+            .join(' ').toLowerCase();
+        return ['user', 'email', 'login'].some(hint => attrs.includes(hint));
+    };
+    const isTextual = el => el.type === 'text' || el.type === 'email';
+    const username = inputs.find(el => isTextual(el) && looksLikeUser(el))
+                  || inputs.find(isTextual);
+
+    if (username) username.setAttribute('data-checker-field', 'username');
+    if (password) password.setAttribute('data-checker-field', 'password');
+    return {
+        username: describe(username),
+        password: describe(password),
+        all_inputs: inputs.map(describe),
+    };
+}"""
 
 
 ALL_BOOKED_INDICATORS = [
@@ -194,6 +229,7 @@ def check_for_slots(test_mode: bool = False):
 
         test_status = "INCOMPLETE (run was interrupted)"
         login_fields = None
+        email_sent = False
 
         try:
             # Step 1: Navigate to PrenotaMi
@@ -213,54 +249,51 @@ def check_for_slots(test_mode: bool = False):
                 except:
                     continue
 
-            page.wait_for_selector("input[type='password']", timeout=45000)
+            # Wait for any login input — not specifically the password field, since the
+            # identity provider may use a two-step flow (username, then password).
+            page.wait_for_selector(
+                "input[type='password'], input[type='text'], input[type='email']",
+                timeout=45000
+            )
 
             # Step 3: Login
-            # Field names on the PingID identity provider are unverified and may be prefixed
-            # (e.g. pf.username), so match in JS with lowercased comparison rather than CSS
-            # attribute selectors, which are case-sensitive. Tag the matches with a data
-            # attribute so Playwright can fill them normally and fire the right events.
             log.info("Logging in...")
-            login_fields = page.evaluate("""() => {
-                const isVisible = el => el.getClientRects().length > 0;
-                const inputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
-                const describe = el => el && {name: el.name, id: el.id, type: el.type};
 
-                const password = inputs.find(el => el.type === 'password');
-                const looksLikeUser = el => {
-                    const attrs = [el.name, el.id, el.getAttribute('autocomplete')]
-                        .join(' ').toLowerCase();
-                    return ['user', 'email', 'login'].some(hint => attrs.includes(hint));
-                };
-                const isTextual = el => el.type === 'text' || el.type === 'email';
-                const username = inputs.find(el => isTextual(el) && looksLikeUser(el))
-                              || inputs.find(isTextual);
+            def submit_login_form():
+                for sel in ["button[type='submit']", "input[type='submit']",
+                            "button:has-text('Next')", "button:has-text('Sign in')",
+                            "button:has-text('Accedi')"]:
+                    try:
+                        el = page.locator(sel).first
+                        if el.is_visible(timeout=2000):
+                            el.click()
+                            return True
+                    except:
+                        continue
+                return False
 
-                if (username) username.setAttribute('data-checker-field', 'username');
-                if (password) password.setAttribute('data-checker-field', 'password');
-                return {
-                    username: describe(username),
-                    password: describe(password),
-                    all_inputs: inputs.map(describe),
-                };
-            }""")
+            login_fields = page.evaluate(FIND_LOGIN_FIELDS_JS)
             log.info(f"Login form fields detected: {login_fields}")
 
-            if not login_fields["username"] or not login_fields["password"]:
-                raise RuntimeError(f"Could not locate login fields. Found: {login_fields['all_inputs']}")
+            if not login_fields["username"] and not login_fields["password"]:
+                raise RuntimeError(f"No login fields found. Inputs on page: {login_fields['all_inputs']}")
 
-            page.fill("[data-checker-field='username']", EMAIL)
+            if login_fields["username"]:
+                page.fill("[data-checker-field='username']", EMAIL)
+
+            # Two-step flow: password isn't on this screen yet, so submit the username
+            # first and wait for the password screen to render.
+            if not login_fields["password"]:
+                log.info("No password field yet — assuming two-step login, submitting username...")
+                submit_login_form()
+                page.wait_for_selector("input[type='password']", timeout=30000)
+                login_fields = page.evaluate(FIND_LOGIN_FIELDS_JS)
+                log.info(f"Password step fields detected: {login_fields}")
+                if not login_fields["password"]:
+                    raise RuntimeError(f"Password field never appeared. Inputs: {login_fields['all_inputs']}")
+
             page.fill("[data-checker-field='password']", PASSWORD)
-
-            for sel in ["button[type='submit']", "input[type='submit']",
-                        "button:has-text('Next')", "button:has-text('Sign in')"]:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=2000):
-                        el.click()
-                        break
-                except:
-                    continue
+            submit_login_form()
 
             page.wait_for_load_state("domcontentloaded", timeout=45000)
             time.sleep(5)
@@ -384,7 +417,7 @@ def check_for_slots(test_mode: bool = False):
                     last_url = page.url
                 except Exception:
                     last_url = "unknown"
-                send_email_notification(
+                email_sent = send_email_notification(
                     f"PRENOTAMI Test: {test_status}",
                     f"This is a test run of the PrenotaMi checker.\\n\\n"
                     f"Result: {test_status}\\n\\n"
@@ -398,6 +431,12 @@ def check_for_slots(test_mode: bool = False):
             browser.close()
 
     log.info("Check complete.")
+
+    # A test run whose email never sent is a failed test — exit non-zero so the workflow
+    # goes red instead of reporting success while silently notifying nobody.
+    if test_mode and not email_sent:
+        log.error("Test run could not send its notification email.")
+        sys.exit(1)
 
 
 def run_loop():
