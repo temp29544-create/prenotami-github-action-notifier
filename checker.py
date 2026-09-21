@@ -37,7 +37,6 @@ NOTIFY_METHOD = os.environ.get("NOTIFY_METHOD", "macos_mail")
 
 LOG_DIR = Path(__file__).parent / "logs"
 COOLDOWN_FILE = Path(__file__).parent / ".last_notified"
-BOOKED_FILE = Path(__file__).parent / ".booked"
 
 LOG_DIR.mkdir(exist_ok=True)
 logging.basicConfig(
@@ -120,12 +119,6 @@ def mark_notified():
     COOLDOWN_FILE.write_text(str(time.time()))
 
 
-def is_already_booked() -> bool:
-    """Manual pause switch: create the .booked file yourself once you've booked
-    (e.g. `touch .booked`) to stop further checks. Delete it to resume."""
-    return BOOKED_FILE.exists()
-
-
 ALL_BOOKED_INDICATORS = [
     "All appointments for this service are currently booked",
     "tutti gli appuntamenti",
@@ -150,10 +143,6 @@ def check_page_for_all_booked(page) -> bool:
 def check_for_slots():
     """Log into PrenotaMi, check for Schengen visa slots, and email a notification if any are open."""
     from playwright.sync_api import sync_playwright
-
-    if is_already_booked():
-        log.info("✅ Already booked! Skipping check. Delete .booked file to re-enable.")
-        return
 
     if not EMAIL or not PASSWORD:
         log.error("PRENOTAMI_EMAIL and PRENOTAMI_PASSWORD must be set.")
@@ -344,9 +333,6 @@ def run_loop():
     """Run the checker in a loop."""
     log.info(f"Starting check loop (interval: {CHECK_INTERVAL}s = {CHECK_INTERVAL//60} min)...")
     while True:
-        if is_already_booked():
-            log.info("✅ Already booked! Exiting loop.")
-            break
         check_for_slots()
         log.info(f"Next check in {CHECK_INTERVAL // 60} minutes...")
         time.sleep(CHECK_INTERVAL)
