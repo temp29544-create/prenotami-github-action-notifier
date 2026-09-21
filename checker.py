@@ -52,8 +52,11 @@ log = logging.getLogger("prenotami")
 NOTIFICATION_LOG = LOG_DIR / "notifications.log"
 
 
-def send_email_notification(subject: str, body: str):
-    """Send notification via macOS alert + log file + say command."""
+def send_email_notification(subject: str, body: str, attachments=None):
+    """Send notification via macOS alert + log file + say command.
+
+    attachments: optional list of image paths to attach to the email.
+    """
     clean_body = body.replace("\\\\n", "\n").replace("\\n", "\n")
 
     # 1. Write to notification log file (always works)
@@ -92,14 +95,30 @@ def send_email_notification(subject: str, body: str):
         try:
             import smtplib
             from email.mime.text import MIMEText
-            msg = MIMEText(clean_body)
+            from email.mime.image import MIMEImage
+            from email.mime.multipart import MIMEMultipart
+
+            msg = MIMEMultipart()
             msg["Subject"] = subject
             msg["From"] = EMAIL
             msg["To"] = ", ".join(NOTIFY_EMAILS)
+            msg.attach(MIMEText(clean_body))
+
+            attached = []
+            for path in attachments or []:
+                path = Path(path)
+                if not path.exists():
+                    continue
+                image = MIMEImage(path.read_bytes())
+                image.add_header("Content-Disposition", "attachment", filename=path.name)
+                msg.attach(image)
+                attached.append(path.name)
+
             with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
                 server.login(EMAIL, gmail_password)
                 server.sendmail(EMAIL, NOTIFY_EMAILS, msg.as_string())
-            log.info(f"Email sent to {', '.join(NOTIFY_EMAILS)} via Gmail SMTP")
+            log.info(f"Email sent to {', '.join(NOTIFY_EMAILS)} via Gmail SMTP"
+                     + (f" with attachments: {', '.join(attached)}" if attached else ""))
         except Exception as e:
             log.warning(f"Gmail SMTP failed (non-critical): {e}")
     else:
@@ -155,6 +174,11 @@ def check_for_slots(test_mode: bool = False):
 
     log.info("Starting slot check...")
 
+    # Clear previous screenshots so this run's set is self-contained — otherwise a local
+    # run would attach stale images from earlier runs to the notification email.
+    for old_screenshot in LOG_DIR.glob("*.png"):
+        old_screenshot.unlink()
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -168,20 +192,19 @@ def check_for_slots(test_mode: bool = False):
         # Handle Facebook password reuse and any other JS alerts automatically
         page.on("dialog", lambda dialog: dialog.accept())
 
+        test_status = "INCOMPLETE (run was interrupted)"
+        login_fields = None
+
         try:
             # Step 1: Navigate to PrenotaMi
             log.info("Navigating to PrenotaMi...")
             page.goto("https://prenotami.esteri.it/", timeout=60000)
-            page.wait_for_selector(
-                "a:has-text('EFFETTUARE IL LOGIN'), a:has-text('LOG IN'), "
-                "a:has-text('Log in'), a[href*='Login']",
-                timeout=45000
-            )
+            page.wait_for_selector("#pingid-button, a[href*='login' i]", timeout=45000)
 
             # Step 2: Click login
             log.info("Clicking login...")
-            for sel in ["a:has-text('EFFETTUARE IL LOGIN')", "a:has-text('LOG IN')",
-                        "a:has-text('Log in')", "a[href*='Login']"]:
+            for sel in ["#pingid-button", "a[href*='login' i]",
+                        "a:has-text('EFFETTUARE IL LOGIN')", "a:has-text('LOG IN')"]:
                 try:
                     el = page.locator(sel).first
                     if el.is_visible(timeout=2000):
@@ -190,32 +213,47 @@ def check_for_slots(test_mode: bool = False):
                 except:
                     continue
 
-            page.wait_for_selector(
-                "input#UserName, input[name='UserName'], input[type='text']",
-                timeout=45000
-            )
+            page.wait_for_selector("input[type='password']", timeout=45000)
 
             # Step 3: Login
+            # Field names on the PingID identity provider are unverified and may be prefixed
+            # (e.g. pf.username), so match in JS with lowercased comparison rather than CSS
+            # attribute selectors, which are case-sensitive. Tag the matches with a data
+            # attribute so Playwright can fill them normally and fire the right events.
             log.info("Logging in...")
-            for sel in ["input#UserName", "input[name='UserName']", "input[type='text']"]:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=3000):
-                        el.fill(EMAIL)
-                        break
-                except:
-                    continue
+            login_fields = page.evaluate("""() => {
+                const isVisible = el => el.getClientRects().length > 0;
+                const inputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
+                const describe = el => el && {name: el.name, id: el.id, type: el.type};
 
-            for sel in ["input#Password", "input[name='Password']", "input[type='password']"]:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=3000):
-                        el.fill(PASSWORD)
-                        break
-                except:
-                    continue
+                const password = inputs.find(el => el.type === 'password');
+                const looksLikeUser = el => {
+                    const attrs = [el.name, el.id, el.getAttribute('autocomplete')]
+                        .join(' ').toLowerCase();
+                    return ['user', 'email', 'login'].some(hint => attrs.includes(hint));
+                };
+                const isTextual = el => el.type === 'text' || el.type === 'email';
+                const username = inputs.find(el => isTextual(el) && looksLikeUser(el))
+                              || inputs.find(isTextual);
 
-            for sel in ["button:has-text('Next')", "button:has-text('Sign in')", "button[type='submit']"]:
+                if (username) username.setAttribute('data-checker-field', 'username');
+                if (password) password.setAttribute('data-checker-field', 'password');
+                return {
+                    username: describe(username),
+                    password: describe(password),
+                    all_inputs: inputs.map(describe),
+                };
+            }""")
+            log.info(f"Login form fields detected: {login_fields}")
+
+            if not login_fields["username"] or not login_fields["password"]:
+                raise RuntimeError(f"Could not locate login fields. Found: {login_fields['all_inputs']}")
+
+            page.fill("[data-checker-field='username']", EMAIL)
+            page.fill("[data-checker-field='password']", PASSWORD)
+
+            for sel in ["button[type='submit']", "input[type='submit']",
+                        "button:has-text('Next')", "button:has-text('Sign in')"]:
                 try:
                     el = page.locator(sel).first
                     if el.is_visible(timeout=2000):
@@ -231,6 +269,7 @@ def check_for_slots(test_mode: bool = False):
             if "login failure" in page_text or "login failed" in page_text:
                 log.error("Login failed!")
                 page.screenshot(path=str(LOG_DIR / "login_failed.png"))
+                test_status = "LOGIN FAILED"
                 return
 
             log.info("Login successful!")
@@ -285,6 +324,7 @@ def check_for_slots(test_mode: bool = False):
             if not schengen_clicked:
                 log.warning("No Schengen PRENOTA button found")
                 page.screenshot(path=str(LOG_DIR / "no_schengen.png"))
+                test_status = "NO SCHENGEN ROW FOUND"
                 return
 
             log.info("Clicked PRENOTA for Schengen visa")
@@ -327,24 +367,34 @@ def check_for_slots(test_mode: bool = False):
                 else:
                     log.info("Within notification cooldown — skipping duplicate email.")
 
-            if test_mode:
-                log.info("Test mode: sending confirmation email regardless of availability/cooldown...")
-                send_email_notification(
-                    "PRENOTAMI: Test Notification",
-                    f"This is a test run of the PrenotaMi checker.\\n\\n"
-                    f"Slot status: {'NO SLOTS (all booked)' if is_all_booked else 'SLOTS DETECTED'}\\n\\n"
-                    f"Screenshot saved as after_prenota.png in the workflow's uploaded logs artifact.\\n\\n"
-                    f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\\n\\n"
-                    f"-- PrenotaMi Checker (test mode)"
-                )
+            test_status = "NO SLOTS (all booked)" if is_all_booked else "SLOTS DETECTED"
 
         except Exception as e:
             log.error(f"Error: {e}")
+            test_status = f"ERROR: {e}"
             try:
                 page.screenshot(path=str(LOG_DIR / "error.png"))
             except:
                 pass
         finally:
+            # Runs on every exit path — normal completion, early return, or exception —
+            # so a test run always reports back, including the failures that `return` early.
+            if test_mode:
+                try:
+                    last_url = page.url
+                except Exception:
+                    last_url = "unknown"
+                send_email_notification(
+                    f"PRENOTAMI Test: {test_status}",
+                    f"This is a test run of the PrenotaMi checker.\\n\\n"
+                    f"Result: {test_status}\\n\\n"
+                    f"Last URL: {last_url}\\n\\n"
+                    f"Login form fields detected: {login_fields}\\n\\n"
+                    f"Screenshots of each step are attached.\\n\\n"
+                    f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\\n\\n"
+                    f"-- PrenotaMi Checker (test mode)",
+                    attachments=sorted(LOG_DIR.glob("*.png"))
+                )
             browser.close()
 
     log.info("Check complete.")
