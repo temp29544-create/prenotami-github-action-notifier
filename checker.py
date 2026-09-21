@@ -30,7 +30,7 @@ load_env()
 
 EMAIL = os.environ.get("PRENOTAMI_EMAIL", "")
 PASSWORD = os.environ.get("PRENOTAMI_PASSWORD", "")
-NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", EMAIL)
+NOTIFY_EMAILS = [e.strip() for e in os.environ.get("NOTIFY_EMAIL", EMAIL).split(",") if e.strip()]
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "300"))
 NOTIFY_COOLDOWN_SECONDS = int(os.environ.get("NOTIFY_COOLDOWN", "1800"))
 NOTIFY_METHOD = os.environ.get("NOTIFY_METHOD", "macos_mail")
@@ -94,11 +94,11 @@ def send_email_notification(subject: str, body: str):
             msg = MIMEText(clean_body)
             msg["Subject"] = subject
             msg["From"] = EMAIL
-            msg["To"] = NOTIFY_EMAIL
+            msg["To"] = ", ".join(NOTIFY_EMAILS)
             with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
                 server.login(EMAIL, gmail_password)
-                server.sendmail(EMAIL, [NOTIFY_EMAIL], msg.as_string())
-            log.info(f"Email sent to {NOTIFY_EMAIL} via Gmail SMTP")
+                server.sendmail(EMAIL, NOTIFY_EMAILS, msg.as_string())
+            log.info(f"Email sent to {', '.join(NOTIFY_EMAILS)} via Gmail SMTP")
         except Exception as e:
             log.warning(f"Gmail SMTP failed (non-critical): {e}")
     else:

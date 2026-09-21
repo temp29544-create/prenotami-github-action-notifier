@@ -43,7 +43,7 @@ Copy `.env.example` to `.env` and fill in your details:
 ```bash
 PRENOTAMI_EMAIL=your-email@example.com
 PRENOTAMI_PASSWORD=your-password
-NOTIFY_EMAIL=your-email@example.com
+NOTIFY_EMAIL=your-email@example.com   # comma-separated for multiple recipients
 CHECK_INTERVAL=900        # seconds (default: 15 minutes)
 NOTIFY_COOLDOWN=1800      # seconds between repeat notifications
 NOTIFY_METHOD=macos_mail  # currently only macos_mail supported
