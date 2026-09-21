@@ -68,22 +68,23 @@ def send_email_notification(subject: str, body: str):
     except Exception as e:
         log.error(f"Failed to write notification log: {e}")
 
-    # 2. macOS display notification
-    try:
-        subprocess.run(
-            ["osascript", "-e",
-             f'display notification "{subject}" with title "PrenotaMi Alert" sound name "Glass"'],
-            capture_output=True, timeout=10
-        )
-        log.info("macOS notification sent")
-    except Exception as e:
-        log.warning(f"macOS notification failed: {e}")
+    # 2. macOS display notification (only on macOS — no-op elsewhere, e.g. GitHub Actions runners)
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(
+                ["osascript", "-e",
+                 f'display notification "{subject}" with title "PrenotaMi Alert" sound name "Glass"'],
+                capture_output=True, timeout=10
+            )
+            log.info("macOS notification sent")
+        except Exception as e:
+            log.warning(f"macOS notification failed: {e}")
 
-    # 3. Say it aloud so user hears it
-    try:
-        subprocess.Popen(["say", "PrenotaMi slot detected! Check the booking!"])
-    except Exception:
-        pass
+        # 3. Say it aloud so user hears it
+        try:
+            subprocess.Popen(["say", "PrenotaMi slot detected! Check the booking!"])
+        except Exception:
+            pass
 
     # 4. Try Gmail SMTP as best-effort (may fail)
     gmail_password = os.environ.get("GMAIL_APP_PASSWORD", "")
