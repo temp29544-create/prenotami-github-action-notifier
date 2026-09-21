@@ -141,8 +141,12 @@ def check_page_for_all_booked(page) -> bool:
 
 
 
-def check_for_slots():
-    """Log into PrenotaMi, check for Schengen visa slots, and email a notification if any are open."""
+def check_for_slots(test_mode: bool = False):
+    """Log into PrenotaMi, check for Schengen visa slots, and email a notification if any are open.
+
+    test_mode: always sends a notification email and keeps screenshots, regardless of
+    slot availability or cooldown — used to verify the login/screenshot/email pipeline works.
+    """
     from playwright.sync_api import sync_playwright
 
     if not EMAIL or not PASSWORD:
@@ -318,6 +322,17 @@ def check_for_slots():
                 else:
                     log.info("Within notification cooldown — skipping duplicate email.")
 
+            if test_mode:
+                log.info("Test mode: sending confirmation email regardless of availability/cooldown...")
+                send_email_notification(
+                    "PRENOTAMI: Test Notification",
+                    f"This is a test run of the PrenotaMi checker.\\n\\n"
+                    f"Slot status: {'NO SLOTS (all booked)' if is_all_booked else 'SLOTS DETECTED'}\\n\\n"
+                    f"Screenshot saved as after_prenota.png in the workflow's uploaded logs artifact.\\n\\n"
+                    f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\\n\\n"
+                    f"-- PrenotaMi Checker (test mode)"
+                )
+
         except Exception as e:
             log.error(f"Error: {e}")
             try:
@@ -344,9 +359,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PrenotaMi Schengen Visa Slot Checker")
     parser.add_argument("--loop", action="store_true", help="Run in continuous loop mode")
     parser.add_argument("--once", action="store_true", help="Run a single check (default)")
+    parser.add_argument("--test", action="store_true",
+                         help="Run once and always send a notification email, regardless of slot availability")
     args = parser.parse_args()
 
     if args.loop:
         run_loop()
     else:
-        check_for_slots()
+        check_for_slots(test_mode=args.test)
